@@ -142,10 +142,12 @@ class EmbeddingModel(nn.Module):
             final_size += hidden_size
         if include_spk:
             final_size += hidden_size
-        self.classifier = nn.Linear(final_size, num_classes).cuda()
+        # Device is controlled by the caller via `.to(device)` on the top-level model.
+        self.classifier = nn.Linear(final_size, num_classes)
 
     def forward(self, xs: List[torch.Tensor], durs=None, onehots=None, spk_embd=None):
-        tone_embeddings = [self.model1(x.cuda()) for x in xs]  # (batch, embedding_size)
+        # Respect the device of the incoming tensors (cpu/cuda/mps).
+        tone_embeddings = [self.model1(x) for x in xs]  # (batch, embedding_size)
         tone_embeddings = [F.relu(x) for x in tone_embeddings]
         tone_embeddings = torch.hstack(tone_embeddings)
 
@@ -161,13 +163,13 @@ class EmbeddingModel(nn.Module):
         if len(extra_feats) > 0:
             x1 = torch.hstack(extra_feats)
             x1 = torch.flatten(x1, 1)
-            x1 = self.model2(x1.cuda())
+            x1 = self.model2(x1)
             x1 = F.relu(x1)
             feats.append(x1)
 
         if self.include_spk:
             assert spk_embd is not None
-            x1 = self.model3(spk_embd.cuda())
+            x1 = self.model3(spk_embd)
             x1 = F.relu(x1)
             feats.append(x1)
 

@@ -3,25 +3,33 @@
 2. Run
 
 ```bash
-  python feature_extration.py
+python feature_extraction.py
 ```
 
-to collect required statistics (phone start time, duration, tones, etc). Results are saved to `utt2tones.json`
+to collect required statistics (phone start time, duration, tones, etc). Results are saved to `utt2tones.json`.
+
+Note: this repo includes a precomputed `utt2tones.json`. If you don’t have the real `phone_ctm.txt` (the repo’s copy may be a Git LFS pointer), you can skip step 2.
 
 3. Run
 
 ```bash
-  python trian/embedding/split_wavs.py
+python train/split_wavs.py
 ```
 
-to split train, test, and validation dataset for embedding model training
+to split train, validation, and test dataset for embedding model training
+
+If you have AISHELL-3 wavs locally, set:
+
+```bash
+export TONE_WAV_DIR=/path/to/AISHELL-3/SPEECHDATA
+```
 
 The test utterances used in the paper are listed in [test_utts.json](test_utts.json)
 
 4. Run
 
 ```bash
-python train/train_embedding.py
+python train/train_embedding.py --save_dir embedding_exp
 ```
 
 to train embedding model, the results are in `exp/`

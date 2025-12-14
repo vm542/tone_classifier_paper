@@ -1,5 +1,10 @@
 import argparse
 import sys
+from pathlib import Path
+
+# Allow running as `python train/train_embedding.py` from repo root (or elsewhere)
+if __package__ is None and __name__ == "__main__":
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
 import numpy as np
 from typing import Tuple
 import json
@@ -9,6 +14,12 @@ from train.utils import (
 )
 from sklearn.metrics import confusion_matrix, accuracy_score, classification_report
 import os
+
+# macOS/conda setups sometimes crash on torch import with:
+#   OMP: Error #15: Initializing libomp.dylib, but found libomp.dylib already initialized.
+# This opt-in workaround keeps the process alive. Override by setting TONE_KMP_DUPLICATE_LIB_OK=0.
+if os.environ.get("TONE_KMP_DUPLICATE_LIB_OK", "1") == "1":
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -19,7 +30,14 @@ from train.config import NUM_CLASSES, EMBD_DIM, IN_PLANES, MAX_GRAD_NORM
 torch.multiprocessing.set_sharing_strategy('file_system')
 
 parser = argparse.ArgumentParser(description='Training embedding')
-parser.add_argument('--save_dir', type=str)
+parser.add_argument('--save_dir', type=str, default='embedding_exp')
+parser.add_argument(
+    '--device',
+    type=str,
+    default='auto',
+    choices=['auto', 'cpu', 'cuda', 'mps'],
+    help='Training device. auto prefers cuda, then mps (Apple Silicon), else cpu.',
+)
 
 parser.add_argument('-j', '--workers', default=10, type=int)
 parser.add_argument('-b', '--batch_size', default=32, type=int)
@@ -31,7 +49,11 @@ parser.add_argument('--test_data_name', default='test', type=str)
 
 parser.add_argument('--use_attention', default=False, action='store_true')
 
-parser.add_argument('--use-syllable-embedding', type=bool, default=True)
+parser.add_argument(
+    '--use-syllable-embedding',
+    action=getattr(argparse, "BooleanOptionalAction", "store_true"),
+    default=True,
+)
 parser.add_argument('--include_segment_feats', default=False, action='store_true')
 parser.add_argument('--include_spk', default=False, action='store_true')
 parser.add_argument('--context_size', default=0, type=int)
@@ -47,6 +69,30 @@ parser.add_argument('--start_epoch', default=0, type=int)
 parser.add_argument('--seed', default=3007123, type=int)
 args = parser.parse_args()
 set_seed(args.seed)
+
+
+def _resolve_device() -> torch.device:
+    if args.device == 'cpu':
+        return torch.device('cpu')
+    if args.device == 'cuda':
+        if not torch.cuda.is_available():
+            raise RuntimeError('Requested --device cuda but torch.cuda.is_available() is False')
+        return torch.device('cuda')
+    if args.device == 'mps':
+        if not hasattr(torch.backends, 'mps') or not torch.backends.mps.is_available():
+            raise RuntimeError('Requested --device mps but torch.backends.mps.is_available() is False')
+        return torch.device('mps')
+
+    # auto
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return torch.device('mps')
+    return torch.device('cpu')
+
+
+DEVICE = _resolve_device()
+print(f'Using device: {DEVICE}')
 
 DATA_DIR = args.data_dir
 SAVE_DIR = args.save_dir
@@ -70,7 +116,10 @@ utt2tones: dict = json.load(open(args.utt2tones))
 
 # data loaders
 data_train: list = json.load(open(f'{DATA_DIR}/train_utts.json'))
-data_test: list = json.load(open(f'{DATA_DIR}/test_utts.json'))
+data_val_path = f'{DATA_DIR}/val_utts.json'
+data_test_path = f'{DATA_DIR}/test_utts.json'
+data_val: list = json.load(open(data_val_path)) if os.path.exists(data_val_path) else []
+data_test: list = json.load(open(data_test_path))
 
 # tone pattern
 tone_pattern = args.tone_pattern.split(',')
@@ -91,23 +140,26 @@ def _create_loader(utt_list):
 
 
 train_loader = _create_loader(data_train)
+val_loader = _create_loader(data_val) if len(data_val) else None
 test_loader = _create_loader(data_test)
 print('train size:', len(train_loader) * args.batch_size)
+if val_loader is not None:
+    print('val size:', len(val_loader) * args.batch_size)
 print('test size:', len(test_loader) * args.batch_size)
 
 # models
 if args.use_attention:
-    inner_model = ResNet34AttStatsPool(IN_PLANES, EMBD_DIM, dropout=0.5).cuda()
+    inner_model = ResNet34AttStatsPool(IN_PLANES, EMBD_DIM, dropout=0.5).to(DEVICE)
 else:
-    inner_model = ResNet34StatsPool(IN_PLANES, EMBD_DIM, dropout=0.5).cuda()
+    inner_model = ResNet34StatsPool(IN_PLANES, EMBD_DIM, dropout=0.5).to(DEVICE)
 
 model = EmbeddingModel(
     inner_model, EMBD_DIM, NUM_CLASSES, include_segment_feats=INCLUDE_SEGMENT_FEATS, context_size=CONTEXT_SIZE,
     include_spk=INCLUDE_SPK, use_syllable_embedding=args.use_syllable_embedding,
-).cuda()
+).to(DEVICE)
 
 # criterion, optimizer, scheduler
-criterion = nn.CrossEntropyLoss().cuda()
+criterion = nn.CrossEntropyLoss().to(DEVICE)
 lr = args.lr
 optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=args.lr_patience, factor=0.1)
@@ -139,7 +191,16 @@ def step(batch: Tuple) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if len(batch) >= 5:
         spk_embd = batch[4]
 
-    y = y.cuda()
+    # Move to device
+    x = [t.to(DEVICE) for t in x]  # list of tensors (context)
+    if durs is not None:
+        durs = durs.to(DEVICE)
+    if onehots is not None:
+        onehots = onehots.to(DEVICE)
+    if spk_embd is not None:
+        spk_embd = spk_embd.to(DEVICE)
+
+    y = y.to(DEVICE)
     y_pred = model(x, durs, onehots, spk_embd)
     return x, y, y_pred
 
@@ -175,7 +236,8 @@ def train():
 
         save_checkpoint(f'exp/{SAVE_DIR}', epoch, model, optimizer, scheduler)
 
-        acc_val = validate(test_loader)
+        # Use val split if present; otherwise fall back to test split.
+        acc_val = validate(val_loader if val_loader is not None else test_loader)
         logger.info(
             '\nEpoch %d\t  Loss %.4f\t  Accuracy %3.3f\t  lr %f\t  acc_val %3.3f\n'
             % (epoch, losses.avg, acc.avg, get_lr(optimizer), acc_val)
@@ -259,10 +321,13 @@ def pca(dataloader: DataLoader):
 
 if __name__ == '__main__':
     if args.action == 'train':
-        model = nn.DataParallel(model)
+        # DataParallel only makes sense for CUDA multi-GPU
+        if DEVICE.type == 'cuda' and torch.cuda.device_count() > 1:
+            model = nn.DataParallel(model)
         train()
     elif args.action == 'test':
-        model = nn.DataParallel(model)
+        if DEVICE.type == 'cuda' and torch.cuda.device_count() > 1:
+            model = nn.DataParallel(model)
         validate(test_loader)
     elif args.action == 'tsne':
         tsne(test_loader)

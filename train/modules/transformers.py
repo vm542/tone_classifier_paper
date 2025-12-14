@@ -47,8 +47,8 @@ class TransEncoder(nn.Module):
 
     def forward(self, x, lengths):
         # build src_key_padding_mask
-        x = x.cuda()
-        padding_mask = get_padding_mask(x, lengths).cuda()
+        device = x.device
+        padding_mask = get_padding_mask(x, lengths).to(device)
 
         # convert to seq_len * batch_size * hidden
         x = x.transpose(0, 1)

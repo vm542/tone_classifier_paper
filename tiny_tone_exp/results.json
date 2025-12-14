@@ -1,0 +1,65 @@
+{
+  "args": {
+    "input": "/Users/dimitri/Projects/tone_classifier/tinytone_aishell3_train_small.parquet",
+    "num_classes": 4,
+    "batch_size": 256,
+    "epochs": 5,
+    "lr": 0.003,
+    "weight_decay": 0.01,
+    "label_smoothing": 0.05,
+    "warmup_frac": 0.05,
+    "device": "auto",
+    "seed": 1234,
+    "save_dir": "tiny_tone_exp",
+    "max_rows": 2000,
+    "cv": 0,
+    "calibrate": "temperature"
+  },
+  "folds": [
+    {
+      "fold": 0,
+      "dev_best_acc": 0.7,
+      "temperature": 0.45893344283103943,
+      "test": {
+        "loss": 1.009440302848816,
+        "acc": 0.59,
+        "top2_acc": 0.89,
+        "per_class_acc": {
+          "0": 0.7352941176470589,
+          "1": 0.43283582089552236,
+          "2": 0.7142857142857143,
+          "3": 0.609375
+        },
+        "confusion_matrix": [
+          [
+            25,
+            1,
+            0,
+            8
+          ],
+          [
+            8,
+            29,
+            16,
+            14
+          ],
+          [
+            0,
+            2,
+            25,
+            8
+          ],
+          [
+            19,
+            3,
+            3,
+            39
+          ]
+        ],
+        "log_loss": 0.9432193472697589,
+        "brier": 0.5404084324836731,
+        "ece": 0.06477350234985352
+      }
+    }
+  ]
+}

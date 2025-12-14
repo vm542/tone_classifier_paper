@@ -1,10 +1,24 @@
+import os
+import sys
+
+# See train/train_embedding.py for context. Override by setting TONE_KMP_DUPLICATE_LIB_OK=0.
+if os.environ.get("TONE_KMP_DUPLICATE_LIB_OK", "1") == "1":
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+# Work around numba/librosa issues on newer Python versions (e.g. 3.13).
+# - On Python < 3.13, leave numba enabled by default (librosa expects it).
+# - Override behavior explicitly with: TONE_DISABLE_NUMBA_JIT=1
+disable_numba = os.environ.get("TONE_DISABLE_NUMBA_JIT", "")
+if disable_numba == "1" or sys.version_info >= (3, 13):
+    os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
+
 import numpy as np
 import librosa
 import os
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader
-from train.config import WAV_DIR, CACHE_DIR, PHONE_TO_ONEHOT, SPEAKER_EMBEDDING_DIR, NUM_CLASSES
+from train.config import WAV_DIRS, CACHE_DIR, PHONE_TO_ONEHOT, SPEAKER_EMBEDDING_DIR, NUM_CLASSES
 from typing import List
 
 
@@ -51,7 +65,13 @@ def get_spk_from_utt(utt: str):
 
 def get_wav_path(utt: str):
     spk = get_spk_from_utt(utt)
-    return os.path.join(WAV_DIR, spk, f'{utt}.wav')
+    # Search across multiple wav roots (e.g. data_aishell3/train/wav and data_aishell3/test/wav).
+    for root in WAV_DIRS:
+        path = os.path.join(root, spk, f'{utt}.wav')
+        if os.path.exists(path):
+            return path
+    # Fall back to the first root so the error message includes the attempted path.
+    return os.path.join(WAV_DIRS[0], spk, f'{utt}.wav')
 
 
 class SpectroFeat:
@@ -89,15 +109,16 @@ class CachedSpectrogramExtractor:
         os.makedirs(self.cache_dir, exist_ok=True)
         self.cache_list_path = os.path.join(self.cache_dir, 'wav.scp')
 
-        f = open(self.cache_list_path, 'a')  # `touch wav.scp`
-        f.close()
+        # Ensure wav.scp exists without keeping an open file handle (DataLoader workers must be picklable on macOS).
+        open(self.cache_list_path, 'a').close()
 
         with open(self.cache_list_path) as f:
             for line in f:
                 utt, path = line.replace('\n', '').split()
                 self.cache[utt] = path
 
-        self.cache_list_file = open(self.cache_list_path, 'a', buffering=1)  # line buffered
+        # Do NOT keep an open file handle here; it breaks multiprocessing pickling on macOS (spawn).
+        # We'll append to wav.scp on demand in load_uncached().
 
     def build_cache_path(self, utt: str):
         spk = get_spk_from_utt(utt)
@@ -131,7 +152,8 @@ class CachedSpectrogramExtractor:
         np.save(cache_path, y, allow_pickle=False)
 
         self.cache[utt] = cache_path
-        self.cache_list_file.write(f'{utt}\t{cache_path}\n')
+        with open(self.cache_list_path, 'a', buffering=1) as f:
+            f.write(f'{utt}\t{cache_path}\n')
         return y
 
     def load_utt(self, utt: str) -> np.ndarray:
